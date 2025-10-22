@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ExoGrid™ Monitoring Console</title>
+  <meta name="description" content="Monitor ExoGrid™ exosuits: battery, energy mix, uptime, devices, alerts."/>
+
+  <!-- Minimal, production-safe CSS (no frameworks) -->
+  <style>
+    :root{
+      --primary:#0d6efd; --accent:#198754; --bg:#f6f7fb; --card:#fff;
+      --text:#111827; --muted:#6b7280; --line:#e5e7eb; --warn:#f59e0b; --crit:#ef4444;
+    }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    a{color:var(--primary);text-decoration:none}
+    header{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);z-index:10}
+    .container{max-width:1200px;margin:0 auto;padding:0 16px}
+    .topbar{display:flex;align-items:center;justify-content:space-between;height:56px}
+    .brand{display:flex;align-items:center;gap:8px}
+    .brand .logo{font-weight:800;color:var(--primary);font-size:20px}
+    .nav a{color:#374151;margin-left:12px}
+    .section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
+    .controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+    .field{display:flex;flex-direction:column;gap:6px}
+    .field label{font-size:12px;color:var(--muted)}
+    select,input[type="date"],button{
+      border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;color:#111;
+    }
+    button{cursor:pointer}
+    .btn{border-color:var(--primary);color:var(--primary)}
+    .btn:hover{background:var(--primary);color:#fff}
+    .btn-ghost:hover{background:#f3f4f6}
+    .pill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:6px 10px;font-size:12px}
+    .pill .dot{width:8px;height:8px;border-radius:999px;background:#9ca3af}
+    .grid{display:grid;gap:16px}
+    .grid-4{grid-template-columns:repeat(4,1fr)}
+    .grid-3{grid-template-columns:repeat(3,1fr)}
+    .grid-2{grid-template-columns:repeat(2,1fr)}
+    @media (max-width:1000px){.grid-4{grid-template-columns:repeat(2,1fr)}}
+    @media (max-width:640px){.grid-3,.grid-4,.grid-2{grid-template-columns:1fr}}
+    .card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px}
+    .kpi-title{font-size:12px;color:var(--muted);display:flex;align-items:center;justify-content:space-between}
+    .kpi-value{font-size:28px;font-weight:800;margin-top:6px}
+    .sub{font-size:12px;color:var(--muted)}
+    .chart-wrap{height:230px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left}
+    thead th{background:#f9fafb;color:#374151;font-weight:600}
+    tbody tr:hover{background:#f9fafb}
+    footer{color:var(--muted);text-align:center;margin:24px 0}
+    .status-ok{background:#dcfce7;color:#166534}.dot-ok{background:#22c55e}
+    .status-warn{background:#fef3c7;color:#92400e}.dot-warn{background:#f59e0b}
+    .status-crit{background:#fee2e2;color:#991b1b}.dot-crit{background:#ef4444}
+    .btn-row{display:flex;gap:8px;align-items:center;margin-left:auto}
+    .flex{display:flex;gap:12px;align-items:center}
+  </style>
+
+  <!-- Chart.js (CDN is fine here; no install needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+
+  <!-- Mock backend FIRST -->
+  <script src="./backend_monitoring.js" defer></script>
+
+  <!-- Page wiring -->
+  <script defer>
+    const $ = (id)=>document.getElementById(id);
+    let charts = {}; let autoTimer=null; let lastRefresh = Promise.resolve();
+
+    function initCharts(){
+      const make=(id,cfg)=>new Chart($(id),cfg);
+
+      charts.soc = make('socChart',{
+        type:'line',
+        data:{labels:[],datasets:[{label:'SoC %',data:[],tension:0.35}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}
+      });
+
+      charts.device = make('devicePie',{
+        type:'pie',
+        data:{labels:[],datasets:[{data:[]}]},
+        options:{responsive:true,maintainAspectRatio:false}
+      });
+
+      charts.src = make('sourceStacked',{
+        type:'bar',
+        data:{labels:[],datasets:[]},
+        options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true}}}
+      });
+
+      charts.flow = make('harvestVsUse',{
+        type:'bar',
+        data:{labels:[],datasets:[{label:'Harvest (kWh)',data:[]},{label:'Consumption (kWh)',data:[]}]},
+        options:{responsive:true,maintainAspectRatio:false}
+      });
+
+      charts.uptime = make('uptimeLine',{
+        type:'line',
+        data:{labels:[],datasets:[{label:'Uptime %',data:[],tension:0.35}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}
+      });
+    }
+
+    function setHealth(health){
+      const pill = $('healthPill'); const dot = pill.querySelector('.dot');
+      pill.className = 'pill';
+      dot.className = 'dot';
+      if(health==='OK'){ pill.classList.add('status-ok'); dot.classList.add('dot-ok'); pill.lastChild.textContent='Status: OK'; }
+      else if(health==='WARNING'){ pill.classList.add('status-warn'); dot.classList.add('dot-warn'); pill.lastChild.textContent='Status: Warning'; }
+      else { pill.classList.add('status-crit'); dot.classList.add('dot-crit'); pill.lastChild.textContent='Status: Maintenance'; }
+    }
+
+    function updateKPIs(k){
+      $('kpiSoc').textContent = k.soc.toFixed(0);
+      $('kpiHarvest').textContent = k.harvestKWh.toFixed(2);
+      $('kpiDevices').textContent = k.devicesCharged;
+      $('kpiUptime').textContent = k.uptimePct.toFixed(0);
+    }
+
+    function updateCharts(m){
+      $('socRange').textContent = m.labels.length ? (m.labels[0]+' → '+m.labels[m.labels.length-1]) : '';
+      charts.soc.data.labels = m.labels;
+      charts.soc.data.datasets[0].data = m.socSeries; charts.soc.update();
+
+      charts.device.data.labels = Object.keys(m.deviceBreakdown);
+      charts.device.data.datasets[0].data = Object.values(m.deviceBreakdown); charts.device.update();
+
+      charts.src.data.labels = m.labels;
+      charts.src.data.datasets = [
+        {label:'Kinetic',data:m.sources.kinetic,stack:'s'},
+        {label:'Thermal',data:m.sources.thermal,stack:'s'},
+        {label:'Piezo',  data:m.sources.piezo,  stack:'s'},
+        {label:'Regen',  data:m.sources.regen,  stack:'s'},
+      ]; charts.src.update();
+
+      charts.flow.data.labels = m.labels;
+      charts.flow.data.datasets[0].data = m.harvest;
+      charts.flow.data.datasets[1].data = m.consumption; charts.flow.update();
+
+      charts.uptime.data.labels = m.weekly.labels;
+      charts.uptime.data.datasets[0].data = m.weekly.uptimePct; charts.uptime.update();
+    }
+
+    function renderEvents(events){
+      $('eventCount').textContent = events.length+' event(s)';
+      $('eventsBody').innerHTML = events.map(e=>{
+        const cls = e.severity==='CRITICAL'?'status-crit':(e.severity==='WARNING'?'status-warn':'status-ok');
+        const dot = e.severity==='CRITICAL'?'dot-crit':(e.severity==='WARNING'?'dot-warn':'dot-ok');
+        return `<tr>
+          <td>${e.time}</td>
+          <td><span class="pill ${cls}" style="padding:4px 8px;"><span class="dot ${dot}"></span>${e.severity}</span></td>
+          <td>${e.code}</td>
+          <td>${e.message}</td>
+          <td><button onclick="alert('Acknowledged: ${e.code}')" class="btn-ghost">Acknowledge</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function setRange(days){
+      const to = new Date();
+      const from = new Date(to); from.setDate(to.getDate()-(days-1));
+      $('fromDate').value = from.toISOString().slice(0,10);
+      $('toDate').value = to.toISOString().slice(0,10);
+    }
+
+    async function refresh(){
+      await lastRefresh; // avoid overlap
+      lastRefresh = (async()=>{
+        try{
+          if(!window.ExoAPI){ console.error('ExoAPI missing'); return; }
+          const id = $('suitSelect').value, from=$('fromDate').value, to=$('toDate').value;
+          const [k, m, ev] = await Promise.all([
+            ExoAPI.getKPIs(id,{from,to}),
+            ExoAPI.getMetrics(id,{from,to}),
+            ExoAPI.getEvents(id,{from,to})
+          ]);
+          updateKPIs(k); setHealth(k.health); updateCharts(m); renderEvents(ev);
+        }catch(err){ console.error(err); }
+      })();
+      return lastRefresh;
+    }
+
+    function bindUI(){
+      $('quick7').onclick = ()=>{ setRange(7); refresh(); };
+      $('quick30').onclick= ()=>{ setRange(30); refresh(); };
+      $('fromDate').onchange = refresh; $('toDate').onchange = refresh; $('suitSelect').onchange = refresh;
+      $('refreshBtn').onclick = refresh;
+      $('exportCsv').onclick = async ()=>{
+        const suit = ExoAPI.getSuitById($('suitSelect').value);
+        const from = $('fromDate').value, to=$('toDate').value;
+        const csv = await ExoAPI.exportMetricsCsv(suit.id,{from,to});
+        const blob = new Blob([csv],{type:'text/csv'}); const a=document.createElement('a');
+        a.href=URL.createObjectURL(blob); a.download=`${suit.assetTag}_${from}_${to}.csv`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      };
+      $('autoRefresh').onchange = (e)=>{
+        if(e.target.checked){ autoTimer=setInterval(()=>refresh(),15000); }
+        else { clearInterval(autoTimer); autoTimer=null; }
+      };
+    }
+
+    async function init(){
+      if(!window.ExoAPI){ alert('backend_monitoring.js not loaded.'); return; }
+      initCharts(); bindUI();
+      const suits = await ExoAPI.getSuits();
+      $('suitSelect').innerHTML = suits.map(s=>`<option value="${s.id}">${s.assetTag} — ${s.operator} @ ${s.site}</option>`).join('');
+      setRange(7); await refresh();
+    }
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+</head>
+<body>
+
+  <header>
+    <div class="container topbar">
+      <div class="brand"><span class="logo">ExoGrid™</span><span style="color:#475569;font-size:13px">Monitoring Console</span></div>
+      <nav class="nav"><a href="frontend.html">Marketing Site</a></nav>
+    </div>
+  </header>
+
+  <main class="container" style="padding:16px 16px 24px;">
+    <!-- Controls -->
+    <section class="section">
+      <div class="controls">
+        <div class="field" style="flex:1">
+          <label>Select Exosuit</label>
+          <select id="suitSelect"></select>
+        </div>
+
+        <div class="field">
+          <label>Date Range</label>
+          <div class="flex">
+            <input id="fromDate" type="date"/>
+            <input id="toDate" type="date"/>
+          </div>
+        </div>
+
+        <div class="flex">
+          <button id="quick7" class="btn-ghost">Last 7d</button>
+          <button id="quick30" class="btn-ghost">Last 30d</button>
+        </div>
+
+        <div class="btn-row">
+          <label class="flex" style="gap:6px;font-size:13px;color:#374151">
+            <input id="autoRefresh" type="checkbox"/> Auto-refresh (15s)
+          </label>
+          <button id="refreshBtn" class="btn-ghost">Refresh</button>
+          <button id="exportCsv" class="btn">Export CSV</button>
+          <span id="healthPill" class="pill"><span class="dot"></span><span>Status: —</span></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- KPIs -->
+    <section class="grid grid-4" style="margin-top:16px;">
+      <div class="card">
+        <div class="kpi-title">Battery SoC</div>
+        <div class="kpi-value"><span id="kpiSoc">—</span>%</div>
+        <div class="sub">Current state of charge</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">Harvested Energy</div>
+        <div class="kpi-value"><span id="kpiHarvest">—</span> kWh</div>
+        <div class="sub">Sum in selected range</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">Devices Charged</div>
+        <div class="kpi-value"><span id="kpiDevices">—</span></div>
+        <div class="sub">AR, scanners, tools</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">Uptime</div>
+        <div class="kpi-value"><span id="kpiUptime">—</span>%</div>
+        <div class="sub">Active & available time</div>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="grid grid-3" style="margin-top:16px;">
+      <div class="card" style="grid-column:span 2;">
+        <div class="kpi-title"><span>Battery SoC Trend</span><span class="sub" id="socRange"></span></div>
+        <div class="chart-wrap"><canvas id="socChart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="kpi-title"><span>Device Charging Breakdown</span><span class="sub">share</span></div>
+        <div class="chart-wrap"><canvas id="devicePie"></canvas></div>
+      </div>
+    </section>
+
+    <section class="grid grid-3" style="margin-top:16px;">
+      <div class="card">
+        <div class="kpi-title"><span>Energy Source Mix</span><span class="sub">Kinetic / Thermal / Piezo / Regen</span></div>
+        <div class="chart-wrap"><canvas id="sourceStacked"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="kpi-title"><span>Harvest vs Consumption</span><span class="sub">kWh per day</span></div>
+        <div class="chart-wrap"><canvas id="harvestVsUse"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="kpi-title"><span>Weekly Uptime</span><span class="sub">%</span></div>
+        <div class="chart-wrap"><canvas id="uptimeLine"></canvas></div>
+      </div>
+    </section>
+
+    <!-- Events -->
+    <section class="card" style="margin-top:16px;">
+      <div class="kpi-title"><span>Events & Alerts</span><span class="sub" id="eventCount">—</span></div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Message</th><th>Action</th></tr></thead>
+          <tbody id="eventsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>© 2025 ExoGrid™ • Monitoring v1.2 (no build, no packages)</footer>
+  </main>
+</body>
+</html>
