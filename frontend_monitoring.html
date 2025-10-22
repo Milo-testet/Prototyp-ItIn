@@ -123,7 +123,18 @@
       charts.soc.data.datasets[0].data = m.socSeries; charts.soc.update();
 
       charts.device.data.labels = Object.keys(m.deviceBreakdown);
-      charts.device.data.datasets[0].data = Object.values(m.deviceBreakdown); charts.device.update();
+      charts.device.data.datasets[0].data = Object.values(m.deviceBreakdown);
+
+      charts.device.data.datasets[0].backgroundColor = [
+        '#0d6efd', // blue  – AR Glasses
+        '#198754', // green – Hand Scanner
+        '#ffc107', // amber – Tablet
+        '#6f42c1', // purple – Torque Tool
+        '#fd7e14'  // orange – Env Sensor
+      ];
+      charts.device.data.datasets[0].borderWidth = 1;
+      charts.device.data.datasets[0].borderColor = '#ffffff';
+      charts.device.update();
 
       charts.src.data.labels = m.labels;
       charts.src.data.datasets = [

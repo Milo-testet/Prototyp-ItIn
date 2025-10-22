@@ -27,48 +27,79 @@
     return out;
   }
 
-  function genDailyMetrics(suitId, from, to){
-    const dates = daysBetween(from,to); const labels = dates.map(iso);
-    const base = 0.25 + ((parseInt((suitId||'0').slice(-1),10) || 1)*0.08);
-    let soc = randi(55,85);
+function genDailyMetrics(suitId, from, to){
+  const dates = daysBetween(from,to);
+  const labels = dates.map(iso);
 
-    const harvest=[], use=[], socSeries=[];
-    const src={kinetic:[],thermal:[],piezo:[],regen:[]};
+  // suit-spezifische Varianz
+  const base = 0.25 + ((parseInt((suitId||'0').slice(-1),10) || 1)*0.08);
+  let soc = randi(55,85);
 
-    dates.forEach((_,i)=>{
-      const activity = 0.9 + 0.35*Math.sin(i/3) + base + (rnd()-0.5)*0.15;
-      const h = clamp(1.9*activity + rand(0,0.5), 0.9, 3.4);
-      const u = clamp(1.5*activity + rand(0,0.7), 0.8, 3.2);
-      harvest.push(+h.toFixed(2)); use.push(+u.toFixed(2));
+  const harvest = [];
+  const use = [];
+  const socSeries = [];
+  const src = { kinetic:[], thermal:[], piezo:[], regen:[] };
 
-      const kin=h*(0.46 + (rnd()-0.5)*0.05);
-      const thr=h*(0.24 + (rnd()-0.5)*0.04);
-      const pie=h*(0.18 + (rnd()-0.5)*0.03);
-      const reg=Math.max(0,h-(kin+thr+pie));
-      src.kinetic.push(+kin.toFixed(2));
-      src.thermal.push(+thr.toFixed(2));
-      src.piezo.push(+pie.toFixed(2));
-      src.regen.push(+reg.toFixed(2));
+  dates.forEach((_, i) => {
+    const activity = 0.9 + 0.35*Math.sin(i/3) + base + (rnd()-0.5)*0.15;
 
-      soc = clamp(soc + Math.round((h-u)*7) + randi(-2,2), 12, 100);
-      socSeries.push(soc);
-    });
+    // 1) Harvested Energy (leicht angehoben für „signifikant größer“)
+    const h = clamp(2.1*activity + rand(0,0.6), 1.2, 3.8);
+    harvest.push(+h.toFixed(2));
 
-    const deviceBreakdown = {
-      "AR Glasses": randi(6,20),
-      "Hand Scanner": randi(25,70),
-      "Tablet": randi(10,30),
-      "Torque Tool": randi(4,14),
-      "Env Sensor": randi(12,32),
-    };
+    // 2) Consumed Energy max 25% von Harvested
+    //    -> zufällig zwischen 40% und 95% des 25%-Limits, damit es realistisch schwankt – aber NIE > 25%
+    const uMax = h * 0.25;
+    const u = clamp(rand(uMax*0.40, uMax*0.95), 0.05, uMax);
+    use.push(+u.toFixed(2));
 
-    const weeks = Math.ceil(dates.length/7);
-    const weekly={labels:[],uptimePct:[]};
-    for(let w=0;w<weeks;w++){ weekly.labels.push(`W${w+1}`); weekly.uptimePct.push(clamp(90 + randi(-6,5), 70, 99)); }
+    // 3) Quellenmix (summe ≈ h)
+    const kin = h * (0.46 + (rnd()-0.5)*0.05);
+    const thr = h * (0.24 + (rnd()-0.5)*0.04);
+    const pie = h * (0.18 + (rnd()-0.5)*0.03);
+    const reg = Math.max(0, h - (kin + thr + pie));
+    src.kinetic.push(+kin.toFixed(2));
+    src.thermal.push(+thr.toFixed(2));
+    src.piezo.push(+pie.toFixed(2));
+    src.regen.push(+reg.toFixed(2));
 
-    return { labels, socSeries, harvest, consumption:use, sources:src, deviceBreakdown, weekly };
+    // 4) SoC-Dynamik:
+    //    Da h >> u, würde SoC sonst zu schnell bei 100% hängen.
+    //    -> "gridDump": Überschuss > 1.0 kWh/Tag wird ins (Mikro-)Grid abgegeben.
+    const gridDump = Math.max(0, (h - u) - 1.0);
+    const effective = (h - u - gridDump); // effektiv fürs interne Laden (≤ ~1.0 kWh)
+    // leichte Selbstentladung (-1) + kleine Rauschkomponente
+    soc = clamp(soc + Math.round(effective*6) + randi(-2,2) - 1, 12, 100);
+    socSeries.push(soc);
+  });
+
+  // 5) Geräteverteilung (Counts)
+  const deviceBreakdown = {
+    "AR Glasses": randi(6,20),
+    "Hand Scanner": randi(25,70),
+    "Tablet": randi(10,30),
+    "Torque Tool": randi(4,14),
+    "Env Sensor": randi(12,32),
+  };
+
+  // 6) Wöchentliche Uptime
+  const weeks = Math.ceil(dates.length/7);
+  const weekly = { labels:[], uptimePct:[] };
+  for(let w=0; w<weeks; w++){
+    weekly.labels.push(`W${w+1}`);
+    weekly.uptimePct.push(clamp(90 + randi(-6,5), 70, 99));
   }
 
+  return {
+    labels,
+    socSeries,
+    harvest,
+    consumption: use,
+    sources: src,
+    deviceBreakdown,
+    weekly
+  };
+}
   function genKPIs(m){
     const soc = m.socSeries.at(-1) ?? 60;
     const harvestKWh = m.harvest.reduce((a,b)=>a+b,0);
